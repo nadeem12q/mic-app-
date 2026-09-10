@@ -1,4 +1,19 @@
-# Validation — 2026-09-10
+# Validation — v0.2, 2026-09-10
+
+The user's OPPO v0.1 report exposed a false-positive status: Bluetooth route #7553 was reported as MATCH while two recordings delivered zero samples. Switching to phone input #17 yielded 111,680 samples; the user also observed level movement. Bluetooth communication routing had been reset before the subsequent recording, so recording with that route active was not tested.
+
+v0.2 addresses the diagnostic bug and provides a guided retest:
+
+- Route status now requires recent data attributed to the currently reported route, with a separate silent-data state. Old data cannot validate a new selection.
+- Progress updates independently of successful reads; zero samples produce a visible final result. Reports include per-route sample counts and peak amplitude.
+- Phone and earbuds quick tests replace the need to navigate advanced routing controls. The earbuds test waits up to five seconds for its communication route/input, records with a temporary communication mode, and releases its request/mode when stopped or finished.
+- Cancelled Bluetooth preparation cannot resume a later test; audio modes belonging to an already-active call are checked before preparation.
+- Twelve evidence regression tests pass, including the OPPO zero-sample case, silent data, stream stalls and stale data after input switching.
+- Final debug build and lint pass: zero errors, 19 diagnostic-text localization warnings. APK signature verified and matches v0.1 for an in-place update. Versioned handoff: `artifacts/mic-route-test-v0.2-debug.apk`.
+
+Guided Bluetooth behavior, sound quality and other-app routing still need a physical-device retest. The APK build and unit tests do not verify them. Use [the short v0.2 phone test](PHONE_TEST.md).
+
+## Historical v0.1 build validation
 
 - Debug APK assembled successfully with Gradle 8.9, AGP 8.7.3, Kotlin 2.0.21 and JDK 21.
 - Six route-evidence unit tests passed, with zero failures or skipped tests.

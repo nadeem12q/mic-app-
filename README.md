@@ -1,10 +1,12 @@
 # mic-app-
 
-## Diagnostic prototype (v0.1)
+## Diagnostic prototype (v0.2)
 
 The repository now contains **Mic Route Test**, a native Kotlin Android 13+ app for checking the routing limits described below. It is a feasibility tool, not a verified system-wide microphone controller.
 
 - Select a test input, record up to 10 seconds, and compare the requested microphone with Android's actual route and silenced status.
+- Use simple phone/earbuds test buttons; the earbuds test prepares a temporary communication route before recording. Advanced controls are initially hidden.
+- Treat routes with no recent samples as waiting, and distinguish silent samples from a signal. Route identity alone is never reported as successful recording.
 - Play the in-memory sample through a selected headset and observe its output route.
 - Make a time-limited communication-output request, reset it, and record manual observations from other apps.
 - Export a text report without audio. No Internet permission, analytics, background recording, root or Shizuku backend.
@@ -21,7 +23,7 @@ Use JDK 17 or 21, Android SDK platform 35 and build-tools 34.0.0. Set `ANDROID_H
 
 With an authorized local phone, install using `adb install -r app/build/outputs/apk/debug/app-debug.apk`. Android Studio can also open the repository directly.
 
-Unit tests check that accepted requests, stale routes, missing routes and silenced recording cannot be reported as verified mic selection. Physical Bluetooth and cross-app tests require the real OPPO; see the pending device matrix in the test guide. No physical-device pass is claimed by a successful build.
+Unit tests cover the OPPO zero-sample regression, stale data after input switches, silent samples, missing routes and silenced recording. The first user report confirmed phone-route data but no Bluetooth samples in v0.1's unprepared test. Guided Bluetooth and cross-app tests still require the real OPPO; see the device matrix in the test guide. No physical-device pass is claimed by a successful build.
 
 ### Original idea
 

@@ -15,6 +15,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
 class MainActivity : Activity() {
@@ -27,6 +28,9 @@ class MainActivity : Activity() {
     private lateinit var logText: TextView
     private lateinit var startButton: Button
     private lateinit var playButton: Button
+    private lateinit var phoneButton: Button
+    private lateinit var earbudsButton: Button
+    private lateinit var resultText: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val capturing = AtomicBoolean(false)
@@ -39,6 +43,27 @@ class MainActivity : Activity() {
     private var destroyed = false
     private var lastEvidence = ""
     private var communicationRequest = false
+    private var preparingBluetooth = false
+    private var bluetoothAttempt = 0
+    private var scopedBluetoothTest = false
+    private var captureStartedAt = 0L
+    private var evidenceSince = 0L
+    @Volatile private var lastRead: CaptureRead? = null
+    private val receivedSamples = AtomicInteger(0)
+    private val progress = object : Runnable {
+        override fun run() {
+            if (destroyed || !capturing.get()) return
+            val elapsed = (SystemClock.elapsedRealtime() - captureStartedAt) / 1000f
+            val recent = lastRead?.takeIf { SystemClock.elapsedRealtime() - it.atMs <= 1000 }
+            meterText.text = if (recent == null) {
+                "Waiting for audio… ${String.format(Locale.US, "%.1f", elapsed)} / 10 s · ${receivedSamples.get()} samples"
+            } else {
+                "Level: ${recent.peak * 100 / 32768}% · ${String.format(Locale.US, "%.1f", elapsed)} / 10 s · ${receivedSamples.get()} samples"
+            }
+            updateStatus()
+            handler.postDelayed(this, 100)
+        }
+    }
     private val events = ArrayDeque<String>()
     private val observations = mutableListOf<String>()
     private val clockFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -85,19 +110,35 @@ class MainActivity : Activity() {
             insets
         }
         heading("Mic Route Test")
-        text("Phone mic + earbuds audio\nAndroid routing feasibility • v0.1", 16)
-        text("This tests real routes. Selecting a mic here does not force other apps to use it. Other-app results stay unverified until you check them.")
+        text("Phone mic + earbuds audio\nAndroid routing feasibility • v0.2", 16)
+        text("Earbuds connect karein. Pehle phone mic, phir earbuds mic test karein. Yeh tests sirf is app ke hain; doosri apps ka mic abhi control nahi hota.")
         button("Allow microphone & Bluetooth") { requestAudioPermissions() }
+        phoneButton = button("1 · Test phone mic (10 seconds)") { quickPhoneTest() }
+        earbudsButton = button("2 · Test earbuds mic (10 seconds)") { quickBluetoothTest() }
+        statusText = text("").apply { setTextColor(Color.rgb(118, 228, 183)) }
+        resultText = text("Abhi koi test complete nahi hua.", 17)
+        meterText = text("Level: idle")
+        playButton = button("Listen to last test on earbuds") { choosePlaybackOutput() }
+        button("Stop test") { stopAudio() }
+        button("Export diagnostic report") { exportReport() }
+        val advancedViews = mutableListOf<View>()
+        var advancedVisible = false
+        val advancedToggle = button("Show advanced controls") {
+            advancedVisible = !advancedVisible
+            advancedViews.forEach { it.visibility = if (advancedVisible) View.VISIBLE else View.GONE }
+        }
+        advancedToggle.setOnClickListener {
+            advancedVisible = !advancedVisible
+            advancedViews.forEach { it.visibility = if (advancedVisible) View.VISIBLE else View.GONE }
+            advancedToggle.text = if (advancedVisible) "Hide advanced controls" else "Show advanced controls"
+        }
+        val advancedStart = body.childCount
         heading("1 · Select test microphone")
         inputChoices = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         body.addView(inputChoices)
         button("Refresh connected devices") { refreshDevices() }
         devicesText = text("")
-        statusText = text("").apply { setTextColor(Color.rgb(118, 228, 183)) }
         startButton = button("Record 10-second test") { startCapture() }
-        meterText = text("Level: idle")
-        playButton = button("Listen to last test on earbuds") { choosePlaybackOutput() }
-        button("Stop audio") { stopAudio() }
         text("Recording stays in memory. Speak near the phone, then near the earbuds. You can switch the selected input during this test. Audio stops when you leave this screen.")
         heading("2 · Communication routing experiment")
         text("This requests an OUTPUT and its Android-selected matching mic. It cannot independently request phone mic + earbuds output. Request lasts up to 2 minutes while this process lives; another app can override it. No microphone is kept recording in the background.")
@@ -106,9 +147,11 @@ class MainActivity : Activity() {
         heading("3 · Other-app results")
         text("Stop test audio, try a call or voice note in another app, then record what you actually heard. Use a consenting test partner for calls. The app cannot confirm another app's microphone.")
         button("Add manual test result") { addObservation() }
-        button("Export diagnostic report") { exportReport() }
         heading("Session log")
         logText = text("").apply { setTextIsSelectable(true); textSize = 12f }
+        for (index in advancedStart until body.childCount) {
+            advancedViews.add(body.getChildAt(index).apply { visibility = View.GONE })
+        }
         audio.registerAudioDeviceCallback(deviceCallback, handler)
         audio.addOnCommunicationDeviceChangedListener(mainExecutor, communicationListener)
         log("Device: ${Build.MANUFACTURER} ${Build.MODEL}; Android ${Build.VERSION.RELEASE}; build ${Build.DISPLAY}")
@@ -163,11 +206,15 @@ class MainActivity : Activity() {
         log("Permissions: ${permissions.mapIndexed { i, p -> "$p=${results.getOrNull(i) == PackageManager.PERMISSION_GRANTED}" }}")
         refreshDevices()
     }
-    private fun refreshDevices() = safely {
-        val inputs = audio.getDevices(AudioManager.GET_DEVICES_INPUTS)
+    private fun refreshDevices(): Unit = safely {
+        val inputs = audio.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.type in setOf(
+            AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE,
+        ) }
         inputChoices.removeAllViews()
         val group = RadioGroup(this)
-        val choices = listOf<AudioDeviceInfo?>(null) + inputs.toList()
+        val choices = listOf<AudioDeviceInfo?>(null) + inputs
         choices.forEach { device ->
             val radio = RadioButton(this).apply {
                 id = View.generateViewId()
@@ -177,7 +224,10 @@ class MainActivity : Activity() {
             group.addView(radio)
             radio.isChecked = device?.id == selectedInput?.id
             radio.setOnClickListener { safely {
+                if (preparingBluetooth) { log("Wait for earbuds preparation or press Stop test."); refreshDevices(); return@safely }
                 selectedInput = device
+                evidenceSince = SystemClock.elapsedRealtime()
+                lastRead = null
                 log("Requested test input: ${device?.let { label(it) } ?: "System default"}")
                 recorder?.let { log("setPreferredDevice accepted=${it.setPreferredDevice(device)}; actual route must be checked") }
                 updateStatus()
@@ -192,17 +242,120 @@ class MainActivity : Activity() {
         val active = record != null && capturing.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING
         val actual = if (active) record?.routedDevice else null
         val silenced = if (active) record?.activeRecordingConfiguration?.isClientSilenced ?: false else false
-        val evidence = RouteEvidence.describe(selectedInput?.id, actual?.id, active, silenced)
+        val evidence = RouteEvidence.describe(selectedInput?.id, actual?.id, active, silenced,
+            lastRead, SystemClock.elapsedRealtime(), evidenceSince)
         statusText.text = "Requested mic: ${selectedInput?.let { label(it) } ?: "System default"}\n" +
             "Actual test mic: ${label(actual)}\n$evidence\n" +
             "Communication output: ${label(audio.communicationDevice)}\nOther-app mic: UNVERIFIED"
         val evidenceKey = "$evidence / ${actual?.id}"
         if (lastEvidence != evidenceKey) { log("$evidence; actual=${label(actual)}"); lastEvidence = evidenceKey }
         startButton.isEnabled = !operationBusy
+        phoneButton.isEnabled = !operationBusy
+        earbudsButton.isEnabled = !operationBusy
         playButton.isEnabled = !operationBusy && clip.isNotEmpty()
     }
 
-    private fun startCapture() {
+    private fun quickPhoneTest() {
+        if (operationBusy) return
+        clearCommunication("Starting phone mic test")
+        selectedInput = audio.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+            ?: error("No phone microphone available")
+        log("Quick phone test: ${label(selectedInput)}; uses first reported built-in input, not a claim about physical mic location")
+        refreshDevices()
+        startCapture()
+    }
+
+    private fun quickBluetoothTest() {
+        if (operationBusy) return
+        if (listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT)
+                .any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
+            requestAudioPermissions(); return
+        }
+        if (audio.mode != AudioManager.MODE_NORMAL) {
+            resultText.text = "Pehle call / voice chat band karein, phir earbuds mic test karein."
+            log("Guided Bluetooth test not started: existing audio mode=${audio.mode}")
+            return
+        }
+        val outputs = audio.availableCommunicationDevices.filter {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        }
+        if (outputs.isEmpty()) {
+            resultText.text = "Earbuds ka call-audio device nahi mila. Bluetooth connect karke dobara try karein."
+            log("No Bluetooth communication output available")
+            return
+        }
+        if (outputs.size == 1) prepareBluetooth(outputs.first())
+        else AlertDialog.Builder(this).setTitle("Choose test earbuds")
+            .setItems(outputs.map { label(it) }.toTypedArray()) { _, index -> safely { prepareBluetooth(outputs[index]) } }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun prepareBluetooth(output: AudioDeviceInfo) {
+        if (operationBusy) return
+        check(audio.mode == AudioManager.MODE_NORMAL) { "Close the active call or voice chat before testing earbuds" }
+        val attempt = ++bluetoothAttempt
+        clearCommunication("Starting guided earbuds test")
+        scopedBluetoothTest = true
+        preparingBluetooth = true
+        operationBusy = true
+        resultText.text = "Earbuds mic tayyar ho raha hai… (maximum 5 seconds)"
+        updateStatus()
+        try {
+            audio.mode = AudioManager.MODE_IN_COMMUNICATION
+            val accepted = audio.setCommunicationDevice(output)
+            log("Guided Bluetooth request: ${label(output)}; accepted=$accepted; temporary communication mode")
+            check(accepted) { "Android rejected the Bluetooth communication request" }
+            communicationRequest = true
+            val started = SystemClock.elapsedRealtime()
+            val poll = object : Runnable {
+                override fun run() {
+                    if (destroyed || !preparingBluetooth || attempt != bluetoothAttempt) return
+                    try {
+                        if (audio.communicationDevice?.id == output.id) {
+                            val inputs = audio.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.type == output.type }
+                            val sameAddress = inputs.filter { output.address.isNotEmpty() && it.address == output.address }
+                            val input = sameAddress.singleOrNull() ?: inputs.singleOrNull()
+                            if (input != null) {
+                                selectedInput = input
+                                preparingBluetooth = false
+                                operationBusy = false
+                                log("Guided Bluetooth route ready: output=${label(output)}, input=${label(input)}")
+                                refreshDevices()
+                                startCapture(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                                check(recorder != null) { "Recording did not start" }
+                                return
+                            }
+                        }
+                        check(SystemClock.elapsedRealtime() - started < 5000) {
+                            "Bluetooth route/input not ready or ambiguous after 5 seconds"
+                        }
+                        handler.postDelayed(this, 100)
+                    } catch (e: Exception) { bluetoothPreparationFailed(e) }
+                }
+            }
+            handler.post(poll)
+        } catch (e: Exception) { bluetoothPreparationFailed(e) }
+    }
+
+    private fun bluetoothPreparationFailed(error: Exception) {
+        preparingBluetooth = false
+        operationBusy = false
+        resultText.text = "Earbuds mic tayyar nahi hua. Report export karein."
+        log("Guided Bluetooth setup failed: ${error.message}")
+        releaseBluetoothTest()
+        updateStatus()
+    }
+
+    private fun releaseBluetoothTest() {
+        if (!scopedBluetoothTest) return
+        scopedBluetoothTest = false
+        clearCommunication("Guided Bluetooth test ended")
+        safely { audio.mode = AudioManager.MODE_NORMAL }
+        log("Released this app's temporary communication mode")
+    }
+
+    private fun startCapture(source: Int = MediaRecorder.AudioSource.MIC) {
         if (operationBusy) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestAudioPermissions(); return
@@ -212,13 +365,13 @@ class MainActivity : Activity() {
         }
         val bufferSize = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(bufferSize > 0) { "16 kHz mono capture is not supported on this device" }
-        val record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.MIC)
+        val record = AudioRecord.Builder().setAudioSource(source)
             .setAudioFormat(AudioFormat.Builder().setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
             .setBufferSizeInBytes(maxOf(bufferSize * 2, 6400)).build()
         try {
             check(record.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord could not initialize" }
-            log("Capture request accepted=${record.setPreferredDevice(selectedInput)}; source=MIC rate=$RATE")
+            log("Capture request accepted=${record.setPreferredDevice(selectedInput)}; source=$source rate=$RATE")
             record.addOnRoutingChangedListener({ handler.post { if (!destroyed && recorder === record) updateStatus() } }, handler)
             record.startRecording()
             check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Android did not start recording" }
@@ -228,28 +381,36 @@ class MainActivity : Activity() {
         operationBusy = true
         clip = ShortArray(0)
         clearClipWhenStopped = false
+        receivedSamples.set(0)
+        lastRead = null
+        captureStartedAt = SystemClock.elapsedRealtime()
+        evidenceSince = captureStartedAt
+        resultText.text = "Recording… phone aur earbuds ke qareeb alag alag bolain."
+        handler.post(progress)
         updateStatus()
         log("Recording started; maximum 10 seconds. Audio stays in memory.")
         worker.execute {
             val samples = ShortArray(RATE * 10)
             val chunk = ShortArray(1600)
             var count = 0
+            var maxPeak = 0
+            val routeSamples = mutableMapOf<Int?, Int>()
             val deadline = SystemClock.elapsedRealtime() + 10_000
             try {
                 while (capturing.get() && count < samples.size && SystemClock.elapsedRealtime() < deadline) {
+                    val routeBefore = record.routedDevice?.id
                     val read = record.read(chunk, 0, minOf(chunk.size, samples.size - count), AudioRecord.READ_NON_BLOCKING)
+                    val routeAfter = record.routedDevice?.id
                     if (read < 0) error("AudioRecord.read returned $read")
                     if (read == 0) { Thread.sleep(20); continue }
                     chunk.copyInto(samples, count, 0, read)
                     count += read
-                    val peak = (0 until read).maxOf { abs(chunk[it].toInt()) } * 100 / 32768
-                    val seconds = count.toFloat() / RATE
-                    handler.post {
-                        if (!destroyed && recorder === record) {
-                            meterText.text = "Level: $peak% · ${String.format(Locale.US, "%.1f", seconds)} / 10 s"
-                            updateStatus()
-                        }
-                    }
+                    val peak = (0 until read).maxOf { abs(chunk[it].toInt()) }
+                    maxPeak = maxOf(maxPeak, peak)
+                    receivedSamples.set(count)
+                    val stableRoute = routeBefore?.takeIf { it == routeAfter }
+                    routeSamples[stableRoute] = (routeSamples[stableRoute] ?: 0) + read
+                    lastRead = CaptureRead(stableRoute, SystemClock.elapsedRealtime(), peak)
                 }
             } catch (e: Exception) { handler.post { log("Capture error: ${e.message}") } }
             finally {
@@ -264,7 +425,17 @@ class MainActivity : Activity() {
                         clip = if (clearClipWhenStopped) ShortArray(0) else recorded
                         operationBusy = false
                         log("Recording stopped: ${recorded.size} samples. Other-app mic remains unverified.")
+                        log("Samples by reported route ID: $routeSamples; maximum amplitude=$maxPeak")
+                        resultText.text = when {
+                            clearClipWhenStopped -> "Test reset. Recording clear kar di gayi."
+                            recorded.isEmpty() -> "No audio received — mic se data nahi aaya. Report export karein."
+                            maxPeak == 0 -> "Silent audio mila — awaaz confirm nahi hui. Report export karein."
+                            else -> "${String.format(Locale.US, "%.1f", recorded.size.toFloat() / RATE)} seconds audio mila. Listen button se mic confirm karein."
+                        }
+                        log("Test result: ${resultText.text}")
                         meterText.text = "Level: idle"
+                        handler.removeCallbacks(progress)
+                        releaseBluetoothTest()
                         updateStatus()
                     }
                 }
@@ -348,9 +519,16 @@ class MainActivity : Activity() {
         if (!destroyed) { log("Playback stopped"); updateStatus() }
     }
     private fun stopAudio() {
+        if (preparingBluetooth) {
+            preparingBluetooth = false
+            operationBusy = false
+            resultText.text = "Earbuds test cancelled."
+            releaseBluetoothTest()
+        }
         capturing.set(false)
         playing.set(false)
         player?.let { finishPlayback(it) }
+        releaseBluetoothTest()
         // The non-blocking capture loop releases its recorder on completion.
     }
     private fun chooseCommunicationOutput() {
@@ -428,7 +606,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 20 && resultCode == RESULT_OK) data?.data?.let { uri -> safely {
             val report = buildString {
-                appendLine("Mic Route Test 0.1 — diagnostic report")
+                appendLine("Mic Route Test 0.2 — diagnostic report")
                 appendLine("${Build.MANUFACTURER} ${Build.MODEL}; Android ${Build.VERSION.RELEASE}; SDK ${Build.VERSION.SDK_INT}; ${Build.DISPLAY}")
                 appendLine("Requested test mic: ${selectedInput?.let { label(it) } ?: "System default"}")
                 appendLine("Other-app actual microphone: UNVERIFIED by this app. Manual observations below are user-reported.")
