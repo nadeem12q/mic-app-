@@ -1,5 +1,30 @@
 # mic-app-
 
+## Diagnostic prototype (v0.1)
+
+The repository now contains **Mic Route Test**, a native Kotlin Android 13+ app for checking the routing limits described below. It is a feasibility tool, not a verified system-wide microphone controller.
+
+- Select a test input, record up to 10 seconds, and compare the requested microphone with Android's actual route and silenced status.
+- Play the in-memory sample through a selected headset and observe its output route.
+- Make a time-limited communication-output request, reset it, and record manual observations from other apps.
+- Export a text report without audio. No Internet permission, analytics, background recording, root or Shizuku backend.
+
+**Start here:** [OPPO phone test instructions](docs/PHONE_TEST.md). Build output: `app/build/outputs/apk/debug/app-debug.apk`; handoff copy: `artifacts/mic-route-test-debug.apk`.
+
+### Build
+
+Use JDK 17 or 21, Android SDK platform 35 and build-tools 34.0.0. Set `ANDROID_HOME` or put `sdk.dir=/your/sdk/path` in ignored `local.properties`. The wrapper pins Gradle 8.9; Android Gradle Plugin is 8.7.3 and Kotlin is 2.0.21.
+
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+```
+
+With an authorized local phone, install using `adb install -r app/build/outputs/apk/debug/app-debug.apk`. Android Studio can also open the repository directly.
+
+Unit tests check that accepted requests, stale routes, missing routes and silenced recording cannot be reported as verified mic selection. Physical Bluetooth and cross-app tests require the real OPPO; see the pending device matrix in the test guide. No physical-device pass is claimed by a successful build.
+
+### Original idea
+
 
 App Idea: Audio Input Controller
 
@@ -16,4 +41,4 @@ Proposed Solution: A user-friendly app that gives control back to the user:
 • Clear Status Indicators: Visual feedback so users know exactly which microphone is currently active.
 
 
-ok yar is readme file ma mana apna basic plan idea likha hai ab mujay ya app ki taraf jana hai to ab ham planing kartay hai ap mujh sa questiong kar kah plan bn saktay hoo mera idea simple hai jaisay android ma agar  ham external devices connect kartay hai jin ma speaker ho to use rka pass option rehta hai kah wo choos ekar skatay hai kah jo sound play ho rhi hai wokhaa pa rsunay gi like earnuds ka speaker ma ya mobile ka builtin speakers ma but for mic use asa koi bhi option hhai hai hmaray pass kah ham mic us ek aduraan kon sa mic us ekarn chahtay hai agar ham earbuds connect kartay hai to auto us ka mic use hona start ho jaata hai or kuch budget earbuds ka mic achay nhai hotay hai or some time us eka lia azzas earbuds ma sunna hi zarori hota hai ow mobile ka speaker  par nhai sun skata or jab to earbuds connect karay hai hearing kalai or mic bhi usi ka use hoat hai jo kah aca nhai hai to mic to chnage karnay ka lai usay ear biuds disconect karnay partay jis wajah sa again whi probelm kah wo apna mobile ka speake rma wo sesotive sound nhai run kar skata  to ab ap planing karo web fecth kari is cheez ka baray ma dekhoo or mujhay btao mujh sa questiong karoo or ya ham app built karay ga 
+ok yar is readme file ma mana apna basic plan idea likha hai ab mujay ya app ki taraf jana hai to ab ham planing kartay hai ap mujh sa questiong kar kah plan bn saktay hoo mera idea simple hai jaisay android ma agar  ham external devices connect kartay hai jin ma speaker ho to use rka pass option rehta hai kah wo choos ekar skatay hai kah jo sound play ho rhi hai wokhaa pa rsunay gi like earnuds ka speaker ma ya mobile ka builtin speakers ma but for mic use asa koi bhi option hhai hai hmaray pass kah ham mic us ek aduraan kon sa mic us ekarn chahtay hai agar ham earbuds connect kartay hai to auto us ka mic use hona start ho jaata hai or kuch budget earbuds ka mic achay nhai hotay hai or some time us eka lia azzas earbuds ma sunna hi zarori hota hai ow mobile ka speaker  par nhai sun skata or jab to earbuds connect karay hai hearing kalai or mic bhi usi ka use hoat hai jo kah aca nhai hai to mic to chnage karnay ka lai usay ear biuds disconect karnay partay jis wajah sa again whi probelm kah wo apna mobile ka speake rma wo sesotive sound nhai run kar skata  to ab ap planing karo web fecth kari is cheez ka baray ma dekhoo or mujhay btao mujh sa questiong karoo or ya ham app built karay ga
